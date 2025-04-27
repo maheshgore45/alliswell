@@ -379,3 +379,113 @@ plt.show()
 --------------------------------------------------------------------------------------------------------
 
 
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras import layers, models
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+IMG_SIZE = (128, 128)
+BATCH_SIZE = 32
+
+train_dir = os.path.join(extract_path, 'train')   # Assuming folders like /train/<class folders>
+test_dir = os.path.join(extract_path, 'test')     # Assuming folders like /test/<class folders>
+
+# Data Augmentation for training
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    zoom_range=0.2,
+    horizontal_flip=True,
+)
+
+# No augmentation for testing, only rescale
+test_datagen = ImageDataGenerator(
+    rescale=1./255
+)
+
+# Create generators
+train_generator = train_datagen.flow_from_directory(
+    train_dir,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical'
+)
+
+test_generator = test_datagen.flow_from_directory(
+    test_dir,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='categorical'
+)
+
+model = models.Sequential([
+    layers.Conv2D(32, (3,3), activation='relu', input_shape=(128, 128, 3)),
+    layers.MaxPooling2D(2,2),
+    
+    layers.Conv2D(64, (3,3), activation='relu'),
+    layers.MaxPooling2D(2,2),
+    
+    layers.Conv2D(128, (3,3), activation='relu'),
+    layers.MaxPooling2D(2,2),
+    
+    layers.Flatten(),
+    layers.Dense(128, activation='relu'),
+    layers.Dropout(0.5),
+    layers.Dense(train_generator.num_classes, activation='softmax')
+])
+
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+history = model.fit(
+    train_generator,
+    epochs=15,
+    validation_data=test_generator
+)
+
+# Plot accuracy
+plt.figure(figsize=(10,5))
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.title('Accuracy During Training')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Plot loss
+plt.figure(figsize=(10,5))
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.title('Loss During Training')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+loss, acc = model.evaluate(test_generator)
+print(f"Test Accuracy: {acc:.2f}")
+
+class_names = list(train_generator.class_indices.keys())
+
+# Get a batch of test images
+images, labels = next(test_generator)
+
+# Predict first image
+pred = model.predict(np.expand_dims(images[0], axis=0))
+predicted_class = class_names[np.argmax(pred)]
+true_class = class_names[np.argmax(labels[0])]
+
+# Plot
+plt.imshow(images[0])
+plt.title(f"True: {true_class} | Predicted: {predicted_class}")
+plt.axis('off')
+plt.show()
+
