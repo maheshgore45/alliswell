@@ -566,3 +566,119 @@ int main() {
 
     return 0;
 }
+
+------------------------------------------------------------------------------------------------------------------------------------------
+
+#include <iostream>
+#include <cuda.h>
+#include <climits> 
+#include <chrono>
+
+__global__ void minKernel(int* arr, int* result, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        atomicMin(result, arr[idx]);
+    }
+}
+
+__global__ void maxKernel(int* arr, int* result, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        atomicMax(result, arr[idx]);
+    }
+}
+
+__global__ void sumKernel(int* arr, long long* result, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        atomicAdd(result, arr[idx]);
+    }
+}
+
+int main() {
+    const int arraySize = 9;
+    int h_arr[arraySize] = {5, 2, 9, 1, 7, 6, 8, 3, 4};
+
+    // Sequential computation
+    auto start_cpu = std::chrono::high_resolution_clock::now();
+
+    int minVal = INT_MAX;
+    int maxVal = INT_MIN;
+    long long sumVal = 0;
+
+    for (int i = 0; i < arraySize; ++i) {
+        if (h_arr[i] < minVal) minVal = h_arr[i];
+        if (h_arr[i] > maxVal) maxVal = h_arr[i];
+        sumVal += h_arr[i];
+    }
+
+    double avgVal = static_cast<double>(sumVal) / arraySize;
+
+    auto end_cpu = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> cpu_duration = end_cpu - start_cpu;
+
+    std::cout << "\nSequential Computation Results:" << std::endl;
+    std::cout << "Minimum: " << minVal << ", Maximum: " << maxVal << ", Sum: " << sumVal << ", Average: " << avgVal << std::endl;
+    std::cout << "Time taken (CPU): " << cpu_duration.count() << " ms" << std::endl;
+
+
+    // Parallel computation (CUDA)
+    int *d_arr, *d_min, *d_max;
+    long long *d_sum;
+    cudaMalloc(&d_arr, arraySize * sizeof(int));
+    cudaMalloc(&d_min, sizeof(int));
+    cudaMalloc(&d_max, sizeof(int));
+    cudaMalloc(&d_sum, sizeof(long long));
+
+    cudaMemcpy(d_arr, h_arr, arraySize * sizeof(int), cudaMemcpyHostToDevice);
+
+    int initialMin = INT_MAX, initialMax = INT_MIN;
+    long long initialSum = 0;
+    cudaMemcpy(d_min, &initialMin, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_max, &initialMax, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sum, &initialSum, sizeof(long long), cudaMemcpyHostToDevice);
+
+    int blockSize = 256;
+    int numBlocks = (arraySize + blockSize - 1) / blockSize;
+
+    // Create CUDA events for timing
+    cudaEvent_t start_gpu, stop_gpu;
+    cudaEventCreate(&start_gpu);
+    cudaEventCreate(&stop_gpu);
+
+    cudaEventRecord(start_gpu);
+
+    minKernel<<<numBlocks, blockSize>>>(d_arr, d_min, arraySize);
+    maxKernel<<<numBlocks, blockSize>>>(d_arr, d_max, arraySize);
+    sumKernel<<<numBlocks, blockSize>>>(d_arr, d_sum, arraySize);
+
+    cudaEventRecord(stop_gpu);
+    cudaEventSynchronize(stop_gpu);
+
+    float gpuTime = 0;
+    cudaEventElapsedTime(&gpuTime, start_gpu, stop_gpu);
+
+    // Copy results back
+    int h_min, h_max;
+    long long h_sum;
+    cudaMemcpy(&h_min, d_min, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_max, d_max, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&h_sum, d_sum, sizeof(long long), cudaMemcpyDeviceToHost);
+
+    double h_avg = static_cast<double>(h_sum) / arraySize;
+
+    std::cout << "\nParallel Computation (CUDA) Results:" << std::endl;
+    std::cout << "Minimum: " << h_min << ", Maximum: " << h_max << ", Sum: " << h_sum << ", Average: " << h_avg << std::endl;
+    std::cout << "Time taken (GPU): " << gpuTime << " ms" << std::endl;
+
+    // Cleanup
+    cudaFree(d_arr);
+    cudaFree(d_min);
+    cudaFree(d_max);
+    cudaFree(d_sum);
+    cudaEventDestroy(start_gpu);
+    cudaEventDestroy(stop_gpu);
+
+    return 0;
+}
+
