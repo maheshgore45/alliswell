@@ -5,126 +5,266 @@
 #include <iomanip>
 #include <fstream>
 #include <limits>
-#define CUDA_CORES 768 // GTX 1050 Ti CUDA cores
-#define BLOCK_SIZE 256 // Best for 1050 Ti
+#include <algorithm> // Missing
+
+#define CUDA_CORES 768  // GTX 1050 Ti CUDA cores
+#define BLOCK_SIZE 256  // Best for 1050 Ti
 #define WARP_SIZE 32
+
 #define CUDA_CHECK(call) \
 { \
-cudaError_t err = call; \
-if (err != cudaSuccess) { \
-std::cerr << "CUDA Error: " << cudaGetErrorString(err) << " at " << LINE <<
-std::endl; \
-exit(EXIT_FAILURE); \
-} \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        std::cerr << "CUDA Error: " << cudaGetErrorString(err) << " at " << __LINE__ << std::endl; \
+        exit(EXIT_FAILURE); \
+    } \
 }
+
 // Warp reduction function
- inline device int warpReduceSum(int val) {
-for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-val += shfl_down_sync(0xFFFFFFFF, val, offset);
-return val;
+__inline__ __device__ int warpReduceSum(int val) {
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+    return val;
 }
+
 // Hierarchical block-level reduction using shared memory
- global void reduceSum(int* input, int* output, int n) {
- shared int sharedData[BLOCK_SIZE];
-int tid = blockIdx.x * blockDim.x + threadIdx.x;
-int localSum = (tid < n) ? input[tid] : 0;
-// Perform warp-level reduction
-localSum = warpReduceSum(localSum);
-// Store warp results in shared memory
-int lane = threadIdx.x % WARP_SIZE;
-int warpId = threadIdx.x / WARP_SIZE;
-if (lane == 0) sharedData[warpId] = localSum;
- syncthreads();
-// Reduce shared memory
-if (warpId == 0) {
-localSum = (lane < (blockDim.x / WARP_SIZE)) ? sharedData[lane] : 0;
-localSum = warpReduceSum(localSum);
+__global__ void reduceSum(int* input, int* output, int n) {
+    __shared__ int sharedData[BLOCK_SIZE];
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int localSum = (tid < n) ? input[tid] : 0;
+
+    // Perform warp-level reduction
+    localSum = warpReduceSum(localSum);
+
+    // Store warp results in shared memory
+    int lane = threadIdx.x % WARP_SIZE;
+    int warpId = threadIdx.x / WARP_SIZE;
+    if (lane == 0) sharedData[warpId] = localSum;
+    __syncthreads();
+
+    // Reduce shared memory
+    if (warpId == 0) {
+        localSum = (lane < (blockDim.x / WARP_SIZE)) ? sharedData[lane] : 0;
+        localSum = warpReduceSum(localSum);
+    }
+
+    // First thread writes block result
+    if (threadIdx.x == 0) atomicAdd(output, localSum);
 }
-// First thread writes block result
-if (threadIdx.x == 0) atomicAdd(output, localSum);
-}
+
 // Sequential CPU Sum
 long long sequentialSum(const std::vector<int>& data) {
-long long sum = 0;
-for (int val : data) sum += val;
-return sum;
+    long long sum = 0;
+    for (int val : data) sum += val;
+    return sum;
 }
+
 // Sequential CPU Min
 int sequentialMin(const std::vector<int>& data) {
-int minVal = std::numeric_limits<int>::max();
-for (int val : data) minVal = std::min(minVal, val);
-return minVal;
+    int minVal = std::numeric_limits<int>::max();
+    for (int val : data) minVal = std::min(minVal, val);
+    return minVal;
 }
+
 // Sequential CPU Average
 double sequentialAverage(const std::vector<int>& data) {
-return static_cast<double>(sequentialSum(data)) / data.size();
+    return static_cast<double>(sequentialSum(data)) / data.size();
 }
+
 int main() {
-std::vector<long long> sizes = {7050000, 5546400, 89000656, 2048805};
-std::vector<int> maxValues = {1000, 2000, 4000, 5000};
-std::cout << "\n";
-std::cout << "\n";
-std::cout << "Name:Devesh Mhaisne Roll no: 41236 CLass: BE B\n";
-std::cout << "\n";
-std::cout << "\n";
-std::cout << " \n";
-std::cout << "| Input Size | Max Value | CPU Sum | GPU Sum | CPU Time (s) | GPU
-Time (s) | Speedup | Efficiency | Avg Value | Min Value |\n";
-std::cout << " \n";
-for (size_t i = 0; i < sizes.size(); i++) {
-long long n = sizes[i];
-int maxValue = maxValues[i];
-std::vector<int> data(n);
-for (long long j = 0; j < n; ++j) {
-data[j] = rand() % maxValue;
+    std::vector<long long> sizes = {7050000, 5546400, 89000656, 2048805};
+    std::vector<int> maxValues = {1000, 2000, 4000, 5000};
+
+    std::cout << "\n";
+    std::cout << "Name: Devesh Mhaisne Roll No: 41236 Class: BE B\n";
+    std::cout << "\n";
+
+    std::cout << "| Input Size | Max Value | CPU Sum      | GPU Sum      | CPU Time (s) | GPU Time (s) | Speedup | Efficiency | Avg Value | Min Value |\n";
+    std::cout << "---------------------------------------------------------------------------------------------------------------------------------\n";
+
+    for (size_t i = 0; i < sizes.size(); i++) {
+        long long n = sizes[i];
+        int maxValue = maxValues[i];
+        std::vector<int> data(n);
+        for (long long j = 0; j < n; ++j) {
+            data[j] = rand() % maxValue;
+        }
+
+        int numBlocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        int* d_input;
+        int* d_output;
+        int h_output = 0;
+
+        CUDA_CHECK(cudaMalloc(&d_input, n * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_output, sizeof(int)));
+        CUDA_CHECK(cudaMemcpy(d_input, data.data(), n * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemset(d_output, 0, sizeof(int)));
+
+        // CPU Calculation
+        auto startSeq = std::chrono::high_resolution_clock::now();
+        long long seqSum = sequentialSum(data);
+        int seqMin = sequentialMin(data);
+        double seqAvg = sequentialAverage(data);
+        auto endSeq = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> seqTime = endSeq - startSeq;
+
+        // GPU Calculation
+        float gpuSumTime;
+        cudaEvent_t start, end;
+        cudaEventCreate(&start);
+        cudaEventCreate(&end);
+        cudaEventRecord(start);
+        reduceSum<<<numBlocks, BLOCK_SIZE>>>(d_input, d_output, n);
+        cudaEventRecord(end);
+        cudaEventSynchronize(end);
+        cudaEventElapsedTime(&gpuSumTime, start, end);
+
+        CUDA_CHECK(cudaMemcpy(&h_output, d_output, sizeof(int), cudaMemcpyDeviceToHost));
+
+        // Speedup Calculation
+        double speedup = seqTime.count() / (gpuSumTime / 1000.0);
+
+        // Efficiency Calculation
+        double efficiency = speedup / CUDA_CORES;
+
+        // Print Results
+        std::cout << "| " << std::setw(10) << n
+                  << " | " << std::setw(9) << maxValue
+                  << " | " << std::setw(12) << seqSum
+                  << " | " << std::setw(12) << h_output
+                  << " | " << std::setw(11) << std::fixed << std::setprecision(6) << seqTime.count()
+                  << " | " << std::setw(11) << std::fixed << std::setprecision(6) << gpuSumTime / 1000.0
+                  << " | " << std::setw(7) << std::fixed << std::setprecision(2) << speedup
+                  << " | " << std::setw(10) << std::fixed << std::setprecision(6) << efficiency
+                  << " | " << std::setw(9) << std::fixed << std::setprecision(2) << seqAvg
+                  << " | " << std::setw(9) << seqMin
+                  << " |\n";
+
+        cudaFree(d_input);
+        cudaFree(d_output);
+    }
+
+    std::cout << "\n";
+    return 0;
 }
-int numBlocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-int* d_input;
-int* d_output;
-int h_output = 0;
-CUDA_CHECK(cudaMalloc(&d_input, n * sizeof(int)));
-CUDA_CHECK(cudaMalloc(&d_output, sizeof(int)));
-CUDA_CHECK(cudaMemcpy(d_input, data.data(), n * sizeof(int),
-cudaMemcpyHostToDevice));
-CUDA_CHECK(cudaMemset(d_output, 0, sizeof(int)));
-// CPU Calculation
-auto startSeq = std::chrono::high_resolution_clock::now();
-long long seqSum = sequentialSum(data);
-int seqMin = sequentialMin(data);
-double seqAvg = sequentialAverage(data);
-auto endSeq = std::chrono::high_resolution_clock::now();
-std::chrono::duration<double> seqTime = endSeq - startSeq;
-// GPU Calculation
-float gpuSumTime;
-cudaEvent_t start, end;
-cudaEventCreate(&start);
-cudaEventCreate(&end);
-cudaEventRecord(start);
-reduceSum<<<numBlocks, BLOCK_SIZE>>>(d_input, d_output, n);
-cudaEventRecord(end);
-cudaEventSynchronize(end);
-cudaEventElapsedTime(&gpuSumTime, start, end);
-CUDA_CHECK(cudaMemcpy(&h_output, d_output, sizeof(int),
-cudaMemcpyDeviceToHost));
-// Speedup Calculation
-double speedup = seqTime.count() / (gpuSumTime / 1000.0);
-// Efficiency Calculation
-double efficiency = speedup / CUDA_CORES;
-// Print Results in Tabular Format
-std::cout << "| " << std::setw(10) << n
-<< " | " << std::setw(9) << maxValue
-<< " | " << std::setw(12) << seqSum
-<< " | " << std::setw(12) << h_output
-<< " | " << std::setw(11) << std::fixed << std::setprecision(6) << seqTime.count()
-<< " | " << std::setw(11) << gpuSumTime / 1000.0
-<< " | " << std::setw(7) << std::fixed << std::setprecision(2) << speedup
-<< " | " << std::setw(10) << std::fixed << std::setprecision(6) << efficiency
-<< " | " << std::setw(9) << std::fixed << std::setprecision(2) << seqAvg
-<< " | " << std::setw(9) << seqMin
-<< " |\n";
-cudaFree(d_input);
-cudaFree(d_output);
+---------------------------------------------------------------------------------------------------------------------------------------------
+
+
+#include <iostream>
+#include <vector>
+#include <chrono>
+#include <cuda_runtime.h>
+#include <iomanip>
+
+#define CUDA_CORES 768 // GTX 1050Ti CUDA cores
+#define CUDA_CHECK(call) \
+{ \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        std::cerr << "CUDA Error: " << cudaGetErrorString(err) << " at line " << __LINE__ << std::endl; \
+        exit(EXIT_FAILURE); \
+    } \
 }
-std::cout << " \n";
-return 0;
+
+/********************** CUDA Kernel: Matrix Multiplication **********************/
+__global__ void matrixMulCanon(int* A, int* B, int* C, int N) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < N && col < N) {
+        int sum = 0;
+        for (int k = 0; k < N; ++k) {
+            sum += A[row * N + k] * B[k * N + col];
+        }
+        C[row * N + col] = sum;
+    }
+}
+
+/********************** Sequential Matrix Multiplication **********************/
+void sequentialMatrixMul(const std::vector<int>& A, const std::vector<int>& B, std::vector<int>& C, int N) {
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) {
+            int sum = 0;
+            for (int k = 0; k < N; ++k) {
+                sum += A[i * N + k] * B[k * N + j];
+            }
+            C[i * N + j] = sum;
+        }
+    }
+}
+
+/********************** Run Matrix Multiplication Test **********************/
+void runMatrixMultiplication(int N) {
+    std::vector<int> A(N * N), B(N * N), C(N * N);
+    for (int i = 0; i < N * N; ++i) {
+        A[i] = rand() % 10;
+        B[i] = rand() % 10;
+    }
+
+    int *d_A, *d_B, *d_C;
+    CUDA_CHECK(cudaMalloc(&d_A, N * N * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_B, N * N * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_C, N * N * sizeof(int)));
+
+    cudaMemcpy(d_A, A.data(), N * N * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, B.data(), N * N * sizeof(int), cudaMemcpyHostToDevice);
+
+    // CPU execution time measurement
+    auto startSeq = std::chrono::high_resolution_clock::now();
+    sequentialMatrixMul(A, B, C, N);
+    auto endSeq = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> seqTime = endSeq - startSeq;
+
+    // GPU execution time measurement
+    float gpuTime;
+    cudaEvent_t start, end;
+    cudaEventCreate(&start);
+    cudaEventCreate(&end);
+    dim3 blockDim(16, 16);
+    dim3 gridDim((N + 15) / 16, (N + 15) / 16);
+    cudaEventRecord(start);
+    matrixMulCanon<<<gridDim, blockDim>>>(d_A, d_B, d_C, N);
+    cudaEventRecord(end);
+    cudaEventSynchronize(end);
+    cudaEventElapsedTime(&gpuTime, start, end);
+
+    // Check for CUDA errors after kernel execution
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "CUDA Kernel Error: " << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
+    }
+
+    double speedup = seqTime.count() / (gpuTime / 1000.0);
+    double efficiency = speedup / CUDA_CORES;  // Or adjust based on block size
+
+    std::cout << std::setw(15) << N
+              << std::setw(20) << seqTime.count()
+              << std::setw(20) << gpuTime
+              << std::setw(20) << speedup
+              << std::setw(20) << efficiency
+              << std::endl;
+
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_C);
+}
+
+/********************** Main Function **********************/
+int main() {
+    std::cout << "\n==== Matrix Multiplication Tests ====\n";
+    std::cout << "Name: Devesh Mhaisne Roll no: 41236 Class: BE B\n";
+    std::cout << std::setw(15) << "Matrix Size"
+              << std::setw(20) << "CPU Time (s)"
+              << std::setw(20) << "GPU Time (ms)"
+              << std::setw(20) << "Speedup"
+              << std::setw(20) << "Efficiency"
+              << std::endl;
+    std::cout << std::string(95, '-') << "\n";
+
+    int matrixTestCases[] = {200, 500, 1024, 2000};  // Large matrix sizes
+    for (int i = 0; i < 4; i++) {
+        runMatrixMultiplication(matrixTestCases[i]);
+    }
+
+    return 0;
 }
